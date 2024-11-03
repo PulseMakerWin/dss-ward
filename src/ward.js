@@ -16,7 +16,7 @@ const getJson = path => {
 }
 
 const getEnv = () => {
-  const vars = [ 'ETH_RPC_URL', 'ETHERSCAN_API_KEY' ];
+  const vars = [ 'ETH_RPC_URL' ];
   const env = {};
   for (const v of vars) {
     if (!process.env[v]) {
@@ -225,45 +225,92 @@ const getAuthority = async (web3, chainLog, address) => {
 }
 
 const getTxs = async (env, address, internal) => {
-  const endpoint = 'https://api.etherscan.io/api';
-  const fixedEntries = 'module=account&startblock=0&sort=asc';
-  const actionEntry = `action=txlist${ internal ? 'internal' : '' }`;
-  const addressEntry = `address=${ address }`;
-  const keyEntry = `apiKey=${env.ETHERSCAN_API_KEY}`;
-  const url = `${ endpoint }?${ fixedEntries }&${ actionEntry }`
-        + `&${ addressEntry }&${ keyEntry }`;
-  let response, data;
   try {
-    response = await fetch(url);
-    data = await response.json();
-  } catch (err) {
-    response = await fetch(url);
-    data = await response.json();
-  }
-  if (data.status != '1') {
-    if (data.message === 'No transactions found') {
-      return [];
+    console.log(`\nStarting transaction scan for ${address} (${internal ? 'internal' : 'external'} transactions)`);
+    const web3 = new Web3(env.ETH_RPC_URL);
+    const latestBlock = await web3.eth.getBlockNumber();
+    console.log(`Latest block: ${latestBlock}`);
+    
+    // Start from PulseChain launch block
+    const START_BLOCK = 16492700;
+    
+    // Process in smaller batches
+    const BATCH_SIZE = 2000;
+    let currentBlock = START_BLOCK;
+    let allTxs = [];
+    
+    while (currentBlock < latestBlock) {
+      const toBlock = Math.min(currentBlock + BATCH_SIZE, latestBlock);
+      
+      // Add progress indicator without extra logging
+      const progress = ((currentBlock - START_BLOCK) / (latestBlock - START_BLOCK) * 100).toFixed(2);
+      process.stdout.write(`\rScanning transactions... ${progress}%`);
+      
+      try {
+        const txBatch = await web3.eth.getPastLogs({
+          fromBlock: currentBlock,
+          toBlock: toBlock,
+          address: address
+        });
+        
+        allTxs = allTxs.concat(txBatch);
+        currentBlock = toBlock + 1;
+        
+        // Add a small delay between batches
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (batchErr) {
+        currentBlock = toBlock + 1;
+        continue;
+      }
     }
-    console.error(data.message);
-    process.exit();
+
+    // Clear the progress line at the end
+    process.stdout.write('\r' + ' '.repeat(50) + '\r');
+    console.log(`Found ${allTxs.length} total transactions`);
+    return allTxs.map(tx => ({
+      from: tx.address,
+      to: tx.address,
+      type: internal ? 'internal' : 'external'
+    }));
+
+  } catch (err) {
+    console.error('\nError getting transactions:', err);
+    return []; 
   }
-  const txs = data.result;
-  return txs;
 }
 
 const getDeployers = async (env, web3, chainLog, address) => {
   const who = getWho(chainLog, address);
-  process.stdout.write(`getting deployer for ${ who }... `);
-  const regularTxs = await getTxs(env, address, false);
-  const internalTxs = await getTxs(env, address, true);
-  const txs = regularTxs.concat(internalTxs);
-  const deployTxs = txs.filter(tx =>
-    tx.type === 'create' || tx.to === ''
-  );
-  const deployers = deployTxs.map(tx => web3.utils.toChecksumAddress(tx.from));
-  const uniqueDeployers = Array.from(new Set(deployers));
-  console.log(uniqueDeployers.map(deployer => getWho(chainLog, deployer)));
-  return uniqueDeployers;
+  console.log(`\nStarting deployer search for ${who} (${address})`);
+  try {
+    console.log('Getting regular transactions...');
+    const regularTxs = await getTxs(env, address, false);
+    
+    console.log('Getting internal transactions...');
+    const internalTxs = await getTxs(env, address, true);
+    
+    const txs = regularTxs.concat(internalTxs);
+    console.log(`Total transactions found: ${txs.length}`);
+    
+    if (txs.length === 0) {
+      console.log('No deployment transactions found');
+      return [];
+    }
+
+    const deployTxs = txs.filter(tx =>
+      tx.type === 'create' || tx.to === ''
+    );
+    console.log(`Found ${deployTxs.length} deployment transactions`);
+    
+    const deployers = deployTxs.map(tx => web3.utils.toChecksumAddress(tx.from));
+    const uniqueDeployers = Array.from(new Set(deployers));
+    console.log('Deployers:', uniqueDeployers.map(deployer => getWho(chainLog, deployer)));
+    return uniqueDeployers;
+  } catch (error) {
+    console.error('\nError in getDeployers:', error);
+    return [];
+  }
 }
 
 const isWard = async (contract, suspect) => {
@@ -741,29 +788,34 @@ const parseArgs = () => {
 }
 
 const ward = async () => {
-  const env = getEnv();
-  const args = parseArgs();
-  const web3 = new Web3(env.ETH_RPC_URL);
-  const chainLog = await getChainLog(args, web3);
-  if (args.mode === 'full') {
-    await fullMode(env, args, web3, chainLog);
-  } else if (args.mode === 'oracles') {
-    await oraclesMode(env, args, web3, chainLog);
-  } else {
-    if (args.contracts.length > 1) {
-      await cacheLogs(args, web3, chainLog, args.contracts);
-    }
-    let tree = '\n\n\n-----------------------------------\n\n\n';
-    for (const contract of args.contracts) {
-      if (args.mode === 'permissions') {
-        tree += await permissionsMode(env, args, web3, chainLog, contract);
-        tree += '\n\n';
-      } else {
-        tree += await contractMode(env, args, web3, chainLog, contract);
-        tree += '\n\n';
+  try {
+    const env = getEnv();
+    const args = parseArgs();
+    const web3 = new Web3(env.ETH_RPC_URL);
+    const chainLog = await getChainLog(args, web3);
+    if (args.mode === 'full') {
+      await fullMode(env, args, web3, chainLog);
+    } else if (args.mode === 'oracles') {
+      await oraclesMode(env, args, web3, chainLog);
+    } else {
+      if (args.contracts.length > 1) {
+        await cacheLogs(args, web3, chainLog, args.contracts);
       }
+      let tree = '\n\n\n-----------------------------------\n\n\n';
+      for (const contract of args.contracts) {
+        if (args.mode === 'permissions') {
+          tree += await permissionsMode(env, args, web3, chainLog, contract);
+          tree += '\n\n';
+        } else {
+          tree += await contractMode(env, args, web3, chainLog, contract);
+          tree += '\n\n';
+        }
+      }
+      console.log(tree);
     }
-    console.log(tree);
+  } catch (error) {
+    console.error('\nFatal error:', error);
+    process.exit(1);
   }
 }
 
