@@ -2,102 +2,405 @@
 <html>
   <head>
     <meta charset="utf-8"/>
-  </head>
-  <body>
-    <script src="../node_modules/d3/dist/d3.js"></script>
-    <script>
-
-      drag = function(simulation) {
-
-        function dragstarted(event) {
-          if (!event.active) simulation.alphaTarget(0.3).restart();
-          event.subject.fx = event.subject.x;
-          event.subject.fy = event.subject.y;
-        }
-
-        function dragged(event) {
-          event.subject.fx = event.x;
-          event.subject.fy = event.y;
-        }
-
-        function dragended(event) {
-          if (!event.active) simulation.alphaTarget(0);
-          event.subject.fx = null;
-          event.subject.fy = null;
-        }
-
-        return d3.drag()
-          .on("start", dragstarted)
-          .on("drag", dragged)
-          .on("end", dragended);
+    <style>
+      .modal {
+        position: fixed;
+        right: 0;
+        top: 0;
+        width: 260px;
+        height: 100%;
+        background: white;
+        border-left: 1px solid #ccc;
+        padding: 30px;
+        overflow-y: auto;
+        min-width: 200px;
+        max-width: 800px;
+        transition: transform 0.3s ease-in-out;
+        z-index: 1000;
+        resize: horizontal;
+        overflow-x: hidden;
       }
 
-      draw = function(data) {
+      .modal.hidden {
+        transform: translateX(calc(100% - 40px));
+      }
 
-        const { links, nodes } = data;
+      .modal * {
+        user-select: none;
+      }
+
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+
+      .hide-button {
+        padding: 5px 10px;
+        cursor: pointer;
+        background: #f0f0f0;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+
+      .hide-button.hidden {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        position: absolute;
+        left: 0;
+        top: 50%;
+        height: auto;
+      }
+
+      .resize-handle {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 100%;
+        width: 5px;
+        cursor: ew-resize;
+        background: rgba(0, 0, 0, 0.1);
+        z-index: 1001;
+      }
+
+      .toggle-container {
+        display: flex;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 50px;
+        height: 24px;
+        margin-right: 10px;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: .4s;
+        border-radius: 24px;
+      }
+
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 16px;
+        width: 16px;
+        left: 4px;
+        bottom: 4px;
+        background-color: white;
+        transition: .4s;
+        border-radius: 50%;
+      }
+
+      input:checked + .slider {
+        background-color: #2196F3;
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(26px);
+      }
+
+      .node-label {
+        font-family: sans-serif;
+        font-size: 14px;
+        cursor: pointer;
+        padding: 2px 5px;
+        border-radius: 3px;
+      }
+
+      .node-label:hover {
+        background-color: #f0f0f0;
+      }
+
+      .toggle-all-container {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #ccc;
+      }
+
+      .toggle-all-button {
+        padding: 5px 10px;
+        cursor: pointer;
+        background: #f0f0f0;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        flex: 1;
+      }
+
+      .toggle-all-button:hover {
+        background: #e0e0e0;
+      }
+
+      #toggles {
+        margin-left: 8px;
+        padding-bottom: 60px;
+      }
+
+      #date-range-container {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 20px;
+        padding: 10px;
+        background-color: #f9f9f9;
+        border-bottom: 1px solid #ccc;
+      }	 
+    </style>
+  </head>
+  <body>
+    <div id="controls" class="modal">
+      <div class="resize-handle" id="resizeHandle"></div>
+      <div class="modal-header">
+        <h3>Toggle Nodes</h3>
+        <button class="hide-button" id="hideModal">Hide</button>
+      </div>
+      <div class="toggle-all-container">
+        <button class="toggle-all-button" id="toggleAll">Hide All</button>
+      </div>
+      <div id="toggles"></div>
+    </div>
+    <div id="date-range-container">
+      <label for="start-date">Start Date:</label>
+      <input type="date" id="start-date">
+      <label for="end-date">End Date:</label>
+      <input type="date" id="end-date">
+      <button id="filter-date-range">Filter</button>
+    </div>		  
+    <button id="sankeyButton">Show Sankey Diagram</button>
+    <div id="chart"></div>
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+
+    <script>
+      // Add event listeners for resizing the modal
+      const resizeHandle = document.getElementById('resizeHandle');
+      const modal = document.getElementById('controls');
+
+      let isResizing = false;
+      let startX;
+      let startWidth;
+
+      resizeHandle.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        startX = e.clientX;
+        startWidth = modal.offsetWidth;
+        document.addEventListener('mousemove', resizeModal);
+        document.addEventListener('mouseup', stopResize);
+        e.preventDefault(); // Prevent text selection during resize
+      });
+
+      function resizeModal(e) {
+        if (isResizing) {
+          const newWidth = startWidth - (e.clientX - startX);
+          if (newWidth >= 200 && newWidth <= 800) { // Keep within defined bounds
+            modal.style.width = newWidth + 'px';
+          }
+        }
+      }
+
+      function stopResize() {
+        isResizing = false;
+        document.removeEventListener('mousemove', resizeModal);
+        document.removeEventListener('mouseup', stopResize);
+      }
+
+      // Rest of your JavaScript for drawing the D3 graph and other features
+      let simulation, links, nodes, svg, sortedNodes;
+      const toggleInputs = []; // Initialize an empty array
+
+      // Function to sort nodes
+      const sortNodes = (nodes) => {
+        return nodes.sort((a, b) => {
+          const aStartsWithNumber = /^\d/.test(a.id);
+          const bStartsWithNumber = /^\d/.test(b.id);
+          if (aStartsWithNumber && !bStartsWithNumber) return 1;
+          if (!aStartsWithNumber && bStartsWithNumber) return -1;
+          return a.id.localeCompare(b.id);
+        });
+      };
+
+      // Fetch data and draw the graph
+      fetch('http://localhost:5783/full')
+        .then(response => response.json())
+        .then(data => draw(data))
+        .catch(error => console.error('Error fetching /full:', error));
+
+      // The draw function
+      function draw(data) {
+        // Assign to the globally scoped variables
+        ({ links, nodes } = data);
+
+        const togglesContainer = document.getElementById('toggles');
+        const nodeVisibility = new Map();
+
+        // Clear and set up the toggles for the sidebar
+        toggleInputs.length = 0; // Clear any previous inputs
+        togglesContainer.innerHTML = ''; // Clear sidebar content
+
+        // Sort and create sidebar toggles
+        sortedNodes = sortNodes([...nodes]);
+        sortedNodes.forEach(nodeItem => {
+          nodeVisibility.set(nodeItem.id, true);
+
+          const toggleContainer = document.createElement('div');
+          toggleContainer.className = 'toggle-container';
+
+          const label = document.createElement('label');
+          label.className = 'toggle-switch';
+
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.checked = true; // Default all toggles to 'checked' initially
+
+          toggleInputs.push(input); // Store reference to input
+
+          const slider = document.createElement('span');
+          slider.className = 'slider';
+
+          const nodeLabel = document.createElement('span');
+          nodeLabel.className = 'node-label';
+          nodeLabel.textContent = nodeItem.id;
+          nodeLabel.style.wordBreak = 'break-all';
+
+          label.appendChild(input);
+          label.appendChild(slider);
+          toggleContainer.appendChild(label);
+          toggleContainer.appendChild(nodeLabel);
+          togglesContainer.appendChild(toggleContainer);
+
+          // Update node visibility in the graph when a toggle is changed
+          input.addEventListener('change', (e) => {
+            const isVisible = e.target.checked;
+            nodeVisibility.set(nodeItem.id, isVisible);
+            updateVisibility();
+          });
+        });
+
+        // Update visibility based on node visibility map
+        function updateVisibility() {
+          node.style('display', d => nodeVisibility.get(d.id) ? 'block' : 'none');
+          link.style('display', d => 
+            nodeVisibility.get(d.source.id) && nodeVisibility.get(d.target.id) ? 'block' : 'none');
+        }
+
+        // Add date range filtering functionality to update both the graph and toggles
+        document.getElementById('filter-date-range').addEventListener('click', () => {
+          const startDate = new Date(document.getElementById('start-date').value);
+          const endDate = new Date(document.getElementById('end-date').value);
+
+          if (isNaN(startDate) || isNaN(endDate)) {
+            alert('Please select valid start and end dates.');
+            return;
+          }
+
+          // Filter nodes and links based on the date range
+          const filteredLinks = links.filter(link => {
+            const linkDate = new Date(link.timestamp);
+            return linkDate >= startDate && linkDate <= endDate;
+          });
+
+          const filteredNodeIds = new Set(filteredLinks.flatMap(link => [link.source.id, link.target.id]));
+          const filteredNodes = nodes.filter(node => filteredNodeIds.has(node.id));
+
+          // Update the nodeVisibility map to match filtered nodes
+          nodeVisibility.clear();
+          filteredNodes.forEach(node => nodeVisibility.set(node.id, true));
+          nodes.forEach(node => {
+            if (!filteredNodeIds.has(node.id)) nodeVisibility.set(node.id, false);
+          });
+
+          // Refresh the toggles to match visibility states
+          toggleInputs.forEach((input, index) => {
+            const node = sortedNodes[index];
+            input.checked = nodeVisibility.get(node.id) || false;
+          });
+
+          updateVisibility(); // Reflect the changes in the graph
+        });
+
 
         const zoom = d3.zoom().on('zoom', e => {
           g.attr('transform', e.transform);
         });
 
-        const svg = d3.create('svg')
-              .attr('viewBox', [0, 0, 600, 600])
-              .call(zoom);
+        svg = d3.create('svg')
+          .attr('viewBox', [0, 0, 600, 600])
+          .call(zoom);
 
         const g = svg.append('g');
 
-        const simulation = d3.forceSimulation(nodes)
-              .force('link', d3.forceLink(links).id(d => d.id).distance(80))
-              .force('center', d3.forceCenter(200, 200).strength(0.05))
-              .force('collision', d3.forceCollide(80).strength(0.3))
-              .force('bodies', d3.forceManyBody()
-                     .strength(-200)
-                     .distanceMin(10)
-                    );
+        simulation = d3.forceSimulation(nodes)
+          .force('link', d3.forceLink(links).id(d => d.id).distance(80))
+          .force('center', d3.forceCenter(200, 200).strength(0.05))
+          .force('collision', d3.forceCollide(80).strength(0.3))
+          .force('bodies', d3.forceManyBody()
+            .strength(-200)
+            .distanceMin(10)
+          );
 
         const link = g.append('g')
-              .selectAll('line')
-              .data(links)
-              .join('g')
-              .on('mouseover', (e, d) => {
-                dimAll();
-                selectLink(d);
-                selectNode(d.target);
-                selectNode(d.source);
-              })
-              .on('mouseout', (e, d) => {
-                litAll();
-                deselectLink(d);
-                deselectNode(d.target);
-                deselectNode(d.source);
-              });
+          .selectAll('line')
+          .data(links)
+          .join('g')
+          .on('mouseover', (e, d) => {
+            dimAll();
+            selectLink(d);
+            selectNode(d.target);
+            selectNode(d.source);
+          })
+          .on('mouseout', (e, d) => {
+            litAll();
+            deselectLink(d);
+            deselectNode(d.target);
+            deselectNode(d.source);
+          });
 
         const linkColor = d => {
           return d.label === 'ward' ?
             '#3e9c3e' :
             d.label === 'owner' ?
-            '#660000' :
-            d.label === 'authority' ?
-            '#9c5106' :
-            d.label === 'bud' ?
-            '#d4c957' :
-            d.label === 'externally owned account' ?
-            'red' :
-            'grey';
+              '#660000' :
+              d.label === 'authority' ?
+                '#9c5106' :
+                d.label === 'bud' ?
+                  '#d4c957' :
+                  d.label === 'externally owned account' ?
+                    'red' :
+                    'grey';
         }
 
         const nodeColor = d => {
           return d.id.startsWith('MCD_') ?
             '#1f585c' :
             d.id.startsWith('PIP_') ?
-            '#141a54' :
-            links.some(l =>
-              l.target.id === d.id && l.label === 'externally owned account'
-            ) ?
-            'red' :
-            !d.id.startsWith('0x') ?
-            '#4c3052' :
-            '#778aa6';
+              '#141a54' :
+              links.some(l =>
+                l.target.id === d.id && l.label === 'externally owned account'
+              ) ?
+                'red' :
+                !d.id.startsWith('0x') ?
+                  '#4c3052' :
+                  '#778aa6';
         }
 
         const dimAll = () => {
@@ -149,95 +452,158 @@
             .style('font-weight', 'initial')
             .style('opacity', d =>
               d.id.startsWith('FLIP_')
-                || d.id.startsWith('CLIP_')
-                || d.id.startsWith('JOIN_') ? 0 : 1
+              || d.id.startsWith('CLIP_')
+              || d.id.startsWith('JOIN_') ? 0 : 1
             );
         }
 
         const defs = svg.append('svg:defs');
         const endArrow = defs.append('svg:marker')
-              .attr('id', 'endArrow')
-              .attr('viewBox', '0 -5 10 10')
-              .attr('refX', 16)
-              .attr('markerWidth', 3.5)
-              .attr('markerHeight', 3.5)
-              .attr('orient', 'auto')
-              .append('svg:path')
-              .attr('d', 'M0,-5L10,0L0,5');
+          .attr('id', 'endArrow')
+          .attr('viewBox', '0 -5 10 10')
+          .attr('refX', 16)
+          .attr('markerWidth', 3.5)
+          .attr('markerHeight', 3.5)
+          .attr('orient', 'auto')
+          .append('svg:path')
+          .attr('d', 'M0,-5L10,0L0,5');
 
         const startArrow = defs.append('svg:marker')
-              .attr('id', 'startArrow')
-              .attr('viewBox', '0 -5 10 10')
-              .attr('refX', -6)
-              .attr('markerWidth', 3.5)
-              .attr('markerHeight', 3.5)
-              .attr('orient', 'auto')
-              .append('svg:path')
-              .attr('d', 'M10,-5L0,0L10,5');
+          .attr('id', 'startArrow')
+          .attr('viewBox', '0 -5 10 10')
+          .attr('refX', -6)
+          .attr('markerWidth', 3.5)
+          .attr('markerHeight', 3.5)
+          .attr('orient', 'auto')
+          .append('svg:path')
+          .attr('d', 'M10,-5L0,0L10,5');
 
         const line = link.append('line')
-              .attr('stroke-width', 2)
-              .style('marker-end', 'url(#endArrow)')
-              .style('marker-start', d => {
-                if(links.some(l =>
-                  l.source.id === d.target.id && l.target.id === d.source.id
-                )) {
-                  return 'url(#startArrow)';
-                }
-                return null;
-              })
-              .attr('stroke', d => linkColor(d))
-              .attr('id', d => 'link-' + d.index)
-              .attr('class', 'link');
+          .attr('stroke-width', 2)
+          .style('marker-end', 'url(#endArrow)')
+          .style('marker-start', d => {
+            if (links.some(l =>
+              l.source.id === d.target.id && l.target.id === d.source.id
+            )) {
+              return 'url(#startArrow)';
+            }
+            return null;
+          })
+          .attr('stroke', d => linkColor(d))
+          .attr('id', d => 'link-' + d.index)
+          .attr('class', 'link');
 
         const label = link.append('text')
-              .style('font-family', 'sans-serif')
-              .text(d => d.label)
-              .attr('stroke', d => linkColor(d))
-              .style('opacity', 0)
-              .style('font-weight', 1000)
-              .attr('id', d => 'label-' + d.index);
+          .style('font-family', 'sans-serif')
+          .text(d => d.label)
+          .attr('stroke', d => linkColor(d))
+          .style('opacity', 0)
+          .style('font-weight', 1000)
+          .attr('id', d => 'label-' + d.index);
 
         const node = g.append('g')
-              .selectAll('circle')
-              .data(nodes)
-              .join('g')
-              .on('mouseover', (e, d) => {
-                dimAll();
-                selectNode(d);
-                for (const linkIn of links.filter(l => l.target.id === d.id)) {
-                  selectLink(linkIn);
-                  selectNode(linkIn.source);
-                }
-                for (const linkOut of links.filter(l => l.source.id === d.id)) {
-                  selectLink(linkOut);
-                  selectNode(linkOut.target);
-                }
-              }).on('mouseout', (e, d) => {
-                litAll();
-                deselectNode(d);
-                for (const linkIn of links.filter(l => l.target.id === d.id)) {
-                  deselectLink(linkIn);
-                  deselectNode(linkIn.source);
-                }
-                for (const linkOut of links.filter(l => l.source.id === d.id)) {
-                  deselectLink(linkOut);
-                  deselectNode(linkOut.target);
-                }
-              }).call(drag(simulation));
+          .selectAll('circle')
+          .data(nodes)
+          .join('g')
+          .on('mouseover', (e, d) => {
+            dimAll();
+            selectNode(d);
+            for (const linkIn of links.filter(l => l.target.id === d.id)) {
+              selectLink(linkIn);
+              selectNode(linkIn.source);
+            }
+            for (const linkOut of links.filter(l => l.source.id === d.id)) {
+              selectLink(linkOut);
+              selectNode(linkOut.target);
+            }
+          }).on('mouseout', (e, d) => {
+            litAll();
+            deselectNode(d);
+            for (const linkIn of links.filter(l => l.target.id === d.id)) {
+              deselectLink(linkIn);
+              deselectNode(linkIn.source);
+            }
+            for (const linkOut of links.filter(l => l.source.id === d.id)) {
+              deselectLink(linkOut);
+              deselectNode(linkOut.target);
+            }
+          }).call(drag(simulation));
 
         const circle = node.append('circle')
-              .attr('r', 5)
-              .attr('id', d => 'circle-' + d.id)
-              .attr('class', 'circle')
-              .attr('fill', d => nodeColor(d));
+          .attr('r', 5)
+          .attr('id', d => 'circle-' + d.id)
+          .attr('class', 'circle')
+          .attr('fill', d => nodeColor(d));
 
         const name = node.append('text')
-              .style('font-family', 'sans-serif')
-              .attr('id', d => 'name-' + d.id)
-              .attr('fill', d => nodeColor(d))
-              .attr('class', 'name')
-              .text(d => d.id.replaceAll('_', ' '));
+          .style('font-family', 'sans-serif')
+          .attr('id', d => 'name-' + d.id)
+          .attr('fill', d => nodeColor(d))
+          .attr('class', 'name')
+          .text(d => d.id.replaceAll('_', ' '));
+
+        // Sort nodes before creating toggles
+        sortedNodes = sortNodes([...nodes]);
+
+        // Clear existing toggles if any
+        toggleInputs.length = 0; // Clear the array
+        togglesContainer.innerHTML = ''; // Clear the container
+
+        sortedNodes.forEach(nodeItem => {
+          nodeVisibility.set(nodeItem.id, true);
+
+          const toggleContainer = document.createElement('div');
+          toggleContainer.className = 'toggle-container';
+
+          const label = document.createElement('label');
+          label.className = 'toggle-switch';
+
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.checked = true;
+
+          toggleInputs.push(input); // Store reference to input
+
+          const slider = document.createElement('span');
+          slider.className = 'slider';
+
+          const nodeLabel = document.createElement('span');
+          nodeLabel.className = 'node-label';
+          nodeLabel.textContent = nodeItem.id;
+          nodeLabel.style.wordBreak = 'break-all';
+
+          // Click handler for the label to focus on the node
+          nodeLabel.addEventListener('click', () => {
+            if (nodeVisibility.get(nodeItem.id)) {
+              focusNode(nodeItem.id);
+            }
+          });
+
+          label.appendChild(input);
+          label.appendChild(slider);
+          toggleContainer.appendChild(label);
+          toggleContainer.appendChild(nodeLabel);
+          togglesContainer.appendChild(toggleContainer);
+
+          input.addEventListener('change', (e) => {
+            const isVisible = e.target.checked;
+            nodeVisibility.set(nodeItem.id, isVisible);
+            updateVisibility();
+          });
+        });
+
+        // Update visibility function
+        function updateVisibility() {
+          // Update nodes visibility
+          node.style('display', d => nodeVisibility.get(d.id) ? 'block' : 'none');
+
+          // Update links visibility
+          link.style('display', d => {
+            const sourceVisible = nodeVisibility.get(d.source.id);
+            const targetVisible = nodeVisibility.get(d.target.id);
+            return sourceVisible && targetVisible ? 'block' : 'none';
+          });
+        }
 
         simulation.on('tick', () => {
           line
@@ -267,14 +633,307 @@
 
           name
             .attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
+
+          updateVisibility();
         });
 
         document.body.append(svg.node());
         d3.selectAll('.name').each(d => deselectNode(d));
+
+        // Add hide modal functionality
+        const hideButton = document.getElementById('hideModal');
+        let modalVisible = true;
+
+        hideButton.addEventListener('click', () => {
+          if (modalVisible) {
+            modal.classList.add('hidden');
+            hideButton.classList.add('hidden');
+            hideButton.textContent = 'Show Controls';
+          } else {
+            modal.classList.remove('hidden');
+            hideButton.classList.remove('hidden');
+            hideButton.textContent = 'Hide';
+          }
+          modalVisible = !modalVisible;
+        });
+
+        // Add window resize handler inside draw function
+        const resizeObserver = new ResizeObserver(() => {
+          simulation.alpha(0.3).restart();
+        });
+
+        resizeObserver.observe(modal);
       }
 
-      fetch('http://localhost:5783/full')
-  .then(response => response.json()).then(data => draw(data));
+      // Function to focus on a node
+      function focusNode(nodeId) {
+        // First, reset all nodes and links to default state
+        d3.selectAll('.circle').attr('r', 5);
+        d3.selectAll('.name').style('font-weight', 'initial').style('opacity', d =>
+          d.id.startsWith('FLIP_') || d.id.startsWith('CLIP_') || d.id.startsWith('JOIN_') ? 0 : 1
+        );
+        d3.selectAll('.link').style('opacity', 0.6).attr('stroke-width', 2);
+        d3.selectAll('.label').style('opacity', 0);
+
+        // Highlight the selected node and its connections
+        const node = d3.select(`#circle-${nodeId}`);
+        const name = d3.select(`#name-${nodeId}`);
+
+        // Highlight the node
+        node.attr('r', 10);
+        name.style('font-weight', 1000).style('opacity', 1);
+
+        // Highlight connected links and nodes
+        links.forEach(link => {
+          if (link.source.id === nodeId || link.target.id === nodeId) {
+            d3.select(`#link-${link.index}`).style('opacity', 1).attr('stroke-width', 4);
+            d3.select(`#label-${link.index}`).style('opacity', 1);
+
+            // Highlight connected nodes
+            const connectedId = link.source.id === nodeId ? link.target.id : link.source.id;
+            d3.select(`#circle-${connectedId}`).attr('r', 8);
+            d3.select(`#name-${connectedId}`).style('font-weight', 800).style('opacity', 1);
+          }
+        });
+
+        
+      }
+
+      // Toggle All Button
+      const toggleAllButton = document.getElementById('toggleAll');
+      let allVisible = true;
+
+      toggleAllButton.addEventListener('click', () => {
+        allVisible = !allVisible;
+        toggleAllButton.textContent = allVisible ? 'Hide All' : 'Show All';
+
+        toggleInputs.forEach(input => {
+          input.checked = allVisible;
+          input.dispatchEvent(new Event('change'));
+        });
+      });
+
+      // Drag function
+      function drag(simulation) {
+        function dragstarted(event) {
+          if (!event.active) simulation.alphaTarget(0.3).restart();
+          event.subject.fx = event.subject.x;
+          event.subject.fy = event.subject.y;
+        }
+
+        function dragged(event) {
+          event.subject.fx = event.x;
+          event.subject.fy = event.y;
+        }
+
+        function dragended(event) {
+          if (!event.active) simulation.alphaTarget(0);
+          event.subject.fx = null;
+          event.subject.fy = null;
+        }
+
+        return d3.drag()
+          .on("start", dragstarted)
+          .on("drag", dragged)
+          .on("end", dragended);
+      }
+
+      document.getElementById('filter-date-range').addEventListener('click', () => {
+        const startDate = new Date(document.getElementById('start-date').value);
+        const endDate = new Date(document.getElementById('end-date').value);
+
+        if (isNaN(startDate) || isNaN(endDate)) {
+          alert('Please select valid start and end dates.');
+          return;
+        }
+
+        // Filter nodes and links based on the date range
+        const filteredLinks = links.filter(link => {
+          const linkDate = new Date(link.timestamp);
+          return linkDate >= startDate && linkDate <= endDate;
+        });
+
+        const filteredNodeIds = new Set(filteredLinks.flatMap(link => [link.source.id, link.target.id]));
+        const filteredNodes = nodes.filter(node => filteredNodeIds.has(node.id));
+
+        // Redraw the graph with filtered data
+        draw({ nodes: filteredNodes, links: filteredLinks });
+      }); 
+
+      const sankeyButton = document.getElementById('sankeyButton');
+      let isSankeyVisible = false;
+
+      sankeyButton.addEventListener('click', () => {
+        if (isSankeyVisible) {
+          // Switch back to the original graph
+          d3.select('svg').remove();
+          draw({ nodes, links }); // Redraw the original graph
+          sankeyButton.textContent = 'Show Sankey Diagram';
+        } else {
+          // Switch to the Sankey diagram
+          d3.select('svg').remove();
+
+          const width = 800;
+          const height = 400;
+
+          const svg = d3.select("#chart")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+          // Helper function to create a unique key for a link
+          function getLinkKey(source, target) {
+            return `${source}->${target}`;
+          }
+
+          // Remove self-loops and handle circular references
+          const selfLoops = links.filter(link => link.source.id === link.target.id);
+          let nonCircularLinks = links.filter(link => link.source.id !== link.target.id);
+
+          // Create a graph representation for cycle detection
+          const graph = new Map();
+          nonCircularLinks.forEach(link => {
+            if (!graph.has(link.source.id)) {
+              graph.set(link.source.id, new Set());
+            }
+            graph.get(link.source.id).add(link.target.id);
+          });
+
+          // Function to detect and break cycles
+          function breakCycles(graph) {
+            const visited = new Set();
+            const recursionStack = new Set();
+            const linksToRemove = new Set();
+
+            function dfs(node, path = []) {
+              if (recursionStack.has(node)) {
+                // Found a cycle, remove the last link in the cycle
+                const cycleStart = path.indexOf(node);
+                const cycle = path.slice(cycleStart);
+                const lastNode = cycle[cycle.length - 1];
+                linksToRemove.add(getLinkKey(lastNode, node));
+                return;
+              }
+
+              if (visited.has(node)) return;
+
+              visited.add(node);
+              recursionStack.add(node);
+              path.push(node);
+
+              const neighbors = graph.get(node) || new Set();
+              for (const neighbor of neighbors) {
+                dfs(neighbor, [...path]);
+              }
+
+              recursionStack.delete(node);
+            }
+
+            // Start DFS from each node
+            for (const node of graph.keys()) {
+              if (!visited.has(node)) {
+                dfs(node);
+              }
+            }
+
+            return linksToRemove;
+          }
+
+          // Break cycles and filter out the removed links
+          const linksToRemove = breakCycles(graph);
+          nonCircularLinks = nonCircularLinks.filter(link => 
+            !linksToRemove.has(getLinkKey(link.source.id, link.target.id))
+          );
+
+          // Create Sankey data with the acyclic graph
+          const sankeyData = {
+            nodes: nodes.map(d => ({ id: d.id })),
+            links: nonCircularLinks.map(d => ({
+              source: d.source.id,
+              target: d.target.id,
+              value: 1
+            }))
+          };
+
+          // Create a node lookup map
+          const nodeMap = new Map(sankeyData.nodes.map(node => [node.id, node]));
+
+          // Update links to reference node objects
+          sankeyData.links = sankeyData.links.map(link => ({
+            source: nodeMap.get(link.source),
+            target: nodeMap.get(link.target),
+            value: link.value
+          }));
+
+          const sankey = d3.sankey()
+            .nodeWidth(20)
+            .nodePadding(10)
+            .extent([[1, 1], [width - 1, height - 6]]);
+
+          // Generate the Sankey layout
+          const { nodes: sankeyNodes, links: sankeyLinks } = sankey({
+            nodes: sankeyData.nodes,
+            links: sankeyData.links
+          });
+
+          // Draw the links
+          svg.append("g")
+            .attr("fill", "none")
+            .attr("stroke", "#000")
+            .attr("stroke-opacity", 0.2)
+            .selectAll("path")
+            .data(sankeyLinks)
+            .join("path")
+            .attr("d", d3.sankeyLinkHorizontal())
+            .attr("stroke-width", d => Math.max(1, d.width))
+            .attr("class", "link");
+
+          // Draw the nodes
+          const node = svg.append("g")
+            .selectAll("g")
+            .data(sankeyNodes)
+            .join("g");
+
+          node.append("rect")
+            .attr("x", d => d.x0)
+            .attr("y", d => d.y0)
+            .attr("height", d => d.y1 - d.y0)
+            .attr("width", d => d.x1 - d.x0)
+            .attr("stroke", "#000")
+            .attr("class", "node");
+
+          // Add self-loop indicators if needed
+          node.filter(d => selfLoops.some(link => link.source.id === d.id))
+            .append("circle")
+            .attr("r", 5)
+            .attr("cx", d => d.x1 - 10)
+            .attr("cy", d => d.y0 + 10)
+            .attr("fill", "red")
+            .append("title")
+            .text("Has self-reference");
+
+          node.append("text")
+            .attr("x", d => d.x0 - 6)
+            .attr("y", d => (d.y1 + d.y0) / 2)
+            .attr("dy", "0.35em")
+            .attr("text-anchor", "end")
+            .text(d => d.id)
+            .filter(d => d.x0 < width / 2)
+            .attr("x", d => d.x1 + 6)
+            .attr("text-anchor", "start");
+
+          node.on("click", (event, d) => {
+            alert("Drill-through for " + d.id);
+          });
+
+          console.log("Nodes:", sankeyData.nodes);
+          console.log("Links:", sankeyData.links);
+          console.log("Self-loops removed:", selfLoops);
+
+          sankeyButton.textContent = 'Show Original Graph';
+        }
+        isSankeyVisible = !isSankeyVisible;
+      });
     </script>
   </body>
 </html>

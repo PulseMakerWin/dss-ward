@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { ArgumentParser } = require('argparse');
 const Web3 = require('web3');
 const settings = require('../settings.js');
@@ -108,66 +109,119 @@ const getTopics = web3 => {
   return topics;
 }
 
-const getLogs = async (args, web3, chainLog, addresses) => {
-  let digest;
-  const hash = createHash('sha256');
-  hash.update(addresses.join());
-  digest = hash.digest('hex');
-  if (cached(args).includes('logs')) {
-    return JSON.parse(fs.readFileSync(`cached/logs-${ digest }.json`, 'utf8'));
+const MAX_RETRIES = 3;
+const BATCH_SIZE_LIMIT = 4096;  // Lower the batch size to prevent overflow
+
+// Fetch past logs with retry logic
+const getPastLogsWithRetry = async (web3, options) => {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await web3.eth.getPastLogs(options);
+    } catch (err) {
+      console.error(`Attempt ${attempt} failed. Retrying...`);
+      if (attempt === MAX_RETRIES) {
+        console.error(`Error after ${MAX_RETRIES} attempts:`, err);
+        return [];
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
   }
-  const who = addresses.length === 1
-        ? await getWho(chainLog, addresses[0])
-        : `${ addresses.length } addresses`;
-  const whos = addresses.map(address => getWho(chainLog, address));
-  console.log(whos);
-  let logs = [];
+};
+
+const PROGRESS_FILE = 'progress.json';
+
+let currentProgress = { fromBlock: null }; // Track current progress in a variable
+
+const saveProgress = (progress) => {
+  fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 4));
+};
+
+const loadProgress = () => {
+  if (fs.existsSync(PROGRESS_FILE)) {
+    return JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'));
+  }
+  return null;
+};
+
+// Listen for termination signals to save progress
+process.on('SIGINT', () => {
+  console.log('\nGracefully shutting down...');
+  if (currentProgress.fromBlock !== null) {
+    saveProgress(currentProgress);
+  }
+  process.exit();
+});
+
+process.on('SIGTERM', () => {
+  console.log('\nGracefully shutting down...');
+  if (currentProgress.fromBlock !== null) {
+    saveProgress(currentProgress);
+  }
+  process.exit();
+});
+
+// Modified getLogs function with batch size control
+const getLogs = async (args, web3, chainLog, addresses) => {
+  const digest = createHash('sha256').update(addresses.join()).digest('hex');
+  const cacheFilePath = `cached/logs-${digest}.json`;
+
+  // Check if logs are already cached
+  if (fs.existsSync(cacheFilePath)) {
+    console.log(`Loading logs from cache: ${cacheFilePath}`);
+    return JSON.parse(fs.readFileSync(cacheFilePath, 'utf8'));
+  }
+
+  const logs = [];
   const topics = getTopics(web3);
   const end = await web3.eth.getBlockNumber();
   const { mcdDeployment } = settings;
   let fromBlock = mcdDeployment;
   const totalBlocks = end - fromBlock;
-  let toBlock = 0;
-  const startTime = new Date();
-  while (toBlock < end) {
-    toBlock = fromBlock + settings.batchSize;
-    const blocksProcessed = fromBlock - mcdDeployment;
-    const progress = 100 * blocksProcessed / totalBlocks;
-    process.stdout.write(`getting logNote and event relies and kisses for `
-                         + `${ who }... ${ progress.toFixed(1) }%\r`);
+
+  // Load progress if available
+  const savedProgress = loadProgress();
+  if (savedProgress && savedProgress.fromBlock) {
+    fromBlock = savedProgress.fromBlock;
+  }
+
+  while (fromBlock < end) {
+    const toBlock = Math.min(fromBlock + BATCH_SIZE_LIMIT, end);
+    const progress = ((fromBlock - mcdDeployment) / totalBlocks * 100).toFixed(2);
+    process.stdout.write(`Scanning logs... ${progress}%\r`);
+
     try {
-      const batch = await web3.eth.getPastLogs(
-        {
-          fromBlock,
-          toBlock: Math.min(toBlock, end),
-          address: addresses,
-          topics,
-        }
-      );
-      logs = logs.concat(batch);
+      const batch = await getPastLogsWithRetry(web3, {
+        fromBlock,
+        toBlock,
+        address: addresses,
+        topics,
+      });
+
+      for (const log of batch) {
+        const block = await web3.eth.getBlock(log.blockNumber);
+        log.timestamp = new Date(block.timestamp * 1000).toISOString();
+      }
+      logs.push(...batch);
+
+      // Update current progress and save it
+      currentProgress.fromBlock = toBlock + 1;
+      saveProgress(currentProgress);
+      fs.writeFileSync(cacheFilePath, JSON.stringify(logs, null, 4));
     } catch (err) {
-      const batch = await web3.eth.getPastLogs(
-        {
-          fromBlock,
-          toBlock: Math.min(toBlock, end),
-          address: addresses,
-          topics,
-        }
-      );
-      logs = logs.concat(batch);
+      console.error('Error fetching logs:', err);
     }
     fromBlock = toBlock + 1;
   }
-  const endTime = new Date();
-  const span = Math.floor((endTime - startTime) / 1000);
-  process.stdout.write(`getting logNote and event relies and kisses for `
-                       + `${ who }... `);
-  console.log(`found ${ logs.length } relies and/or kisses in ${ span } `
-              + `seconds`);
-  const jsonLogs = JSON.stringify(logs, null, 4);
-  fs.writeFileSync(`cached/logs-${ digest }.json`, jsonLogs);
+
+  process.stdout.write('\rScanning logs... 100%\n'); // Clear the line after completion
+
+  // Remove progress file after completion
+  if (fs.existsSync(PROGRESS_FILE)) {
+    fs.unlinkSync(PROGRESS_FILE);
+  }
+
   return logs;
-}
+};
 
 const getReliesAndKisses = async (args, web3, chainLog, address) => {
   const who = getWho(chainLog, address);
@@ -175,10 +229,9 @@ const getReliesAndKisses = async (args, web3, chainLog, address) => {
   let logs;
   if (scannedAddresses.includes(address)) {
     logs = allLogs.filter(log => log.address === address);
-    console.log(`getting logNote and event relies and kisses for ${ who }... `
-                + `found ${ logs.length } cached relies and/or kisses`);
+    console.log(`getting logNote and event relies and kisses for ${who}... found ${logs.length} cached relies and/or kisses`);
   } else {
-    logs = await getLogs(args, web3, chainLog, [ address ]);
+    logs = await getLogs(args, web3, chainLog, [address]);
     allLogs.push(...logs);
     scannedAddresses.push(address);
   }
@@ -194,7 +247,7 @@ const getOwner = async (web3, chainLog, address) => {
   const who = getWho(chainLog, address);
   const abi = getJson('./lib/ds-pause/out/DSPause.abi');
   const contract = new web3.eth.Contract(abi, address);
-  process.stdout.write(`getting owner for ${ who }... `);
+  process.stdout.write(`getting owner for ${who}... `);
   try {
     const owner = await contract.methods.owner().call();
     console.log(getWho(chainLog, owner));
@@ -211,7 +264,7 @@ const getAuthority = async (web3, chainLog, address) => {
   const who = getWho(chainLog, address);
   const abi = getJson('./lib/ds-pause/out/DSPause.abi');
   const contract = new web3.eth.Contract(abi, address);
-  process.stdout.write(`getting authority for ${ who }... `);
+  process.stdout.write(`getting authority for ${who}... `);
   try {
     const authority = await contract.methods.authority().call();
     console.log(getWho(chainLog, authority));
@@ -225,60 +278,44 @@ const getAuthority = async (web3, chainLog, address) => {
 }
 
 const getTxs = async (env, address, internal) => {
-  try {
-    console.log(`\nStarting transaction scan for ${address} (${internal ? 'internal' : 'external'} transactions)`);
-    const web3 = new Web3(env.ETH_RPC_URL);
-    const latestBlock = await web3.eth.getBlockNumber();
-    console.log(`Latest block: ${latestBlock}`);
-    
-    // Start from PulseChain launch block
-    const START_BLOCK = 16492700;
-    
-    // Process in smaller batches
-    const BATCH_SIZE = 2000;
-    let currentBlock = START_BLOCK;
-    let allTxs = [];
-    
-    while (currentBlock < latestBlock) {
-      const toBlock = Math.min(currentBlock + BATCH_SIZE, latestBlock);
-      
-      // Add progress indicator without extra logging
-      const progress = ((currentBlock - START_BLOCK) / (latestBlock - START_BLOCK) * 100).toFixed(2);
-      process.stdout.write(`\rScanning transactions... ${progress}%`);
-      
-      try {
-        const txBatch = await web3.eth.getPastLogs({
-          fromBlock: currentBlock,
-          toBlock: toBlock,
-          address: address
+  console.log(`Starting ${internal ? 'internal' : 'external'} transaction scan for ${address}`);
+  const web3 = new Web3(env.ETH_RPC_URL);
+  const latestBlock = await web3.eth.getBlockNumber();
+  const START_BLOCK = 16492700;
+  let currentBlock = START_BLOCK;
+  const allTxs = [];
+
+  while (currentBlock < latestBlock) {
+    const toBlock = Math.min(currentBlock + BATCH_SIZE_LIMIT, latestBlock);
+    const progress = ((currentBlock - START_BLOCK) / (latestBlock - START_BLOCK) * 100).toFixed(2);
+    process.stdout.write(`\rScanning transactions... ${progress}%`);
+
+    try {
+      const batch = await getPastLogsWithRetry(web3, {
+        fromBlock: currentBlock,
+        toBlock: toBlock,
+        address: address,
+      });
+
+      for (const tx of batch) {
+        const block = await web3.eth.getBlock(tx.blockNumber);
+        allTxs.push({
+          from: tx.address,
+          to: tx.address,
+          type: internal ? 'internal' : 'external',
+          timestamp: new Date(block.timestamp * 1000).toISOString(),
         });
-        
-        allTxs = allTxs.concat(txBatch);
-        currentBlock = toBlock + 1;
-        
-        // Add a small delay between batches
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-      } catch (batchErr) {
-        currentBlock = toBlock + 1;
-        continue;
       }
+    } catch (err) {
+      console.warn(`Error processing batch ${currentBlock}-${toBlock}:`, err);
     }
-
-    // Clear the progress line at the end
-    process.stdout.write('\r' + ' '.repeat(50) + '\r');
-    console.log(`Found ${allTxs.length} total transactions`);
-    return allTxs.map(tx => ({
-      from: tx.address,
-      to: tx.address,
-      type: internal ? 'internal' : 'external'
-    }));
-
-  } catch (err) {
-    console.error('\nError getting transactions:', err);
-    return []; 
+    currentBlock = toBlock + 1;
   }
-}
+
+  process.stdout.write('Scanning transactions... 100%');
+  console.log(`Found ${allTxs.length} transactions`);
+  return allTxs;
+};
 
 const getDeployers = async (env, web3, chainLog, address) => {
   const who = getWho(chainLog, address);
@@ -329,14 +366,14 @@ const checkSuspects = async (web3, chainLog, address, suspects) => {
   for (const suspect of suspects) {
     const progress = Math.floor(100 * count / suspects.length);
     count ++;
-    process.stdout.write(`checking wards for ${ who }... ${ progress }%\r`);
+    process.stdout.write(`checking wards for ${who}... ${progress}%\r`);
     try {
       const relied = await isWard(contract, suspect);
       if (relied) {
         relies.push(suspect);
       }
     } catch (err) {
-      console.log(`checking wards for ${ who }... no wards`);
+      console.log(`checking wards for ${who}... no wards`);
       hasWards = false;
       break;
     }
@@ -344,8 +381,7 @@ const checkSuspects = async (web3, chainLog, address, suspects) => {
   const end = new Date();
   const span = Math.floor((end - start) / 1000);
   if (hasWards) {
-    console.log(`checking wards for ${ who }... found ${ relies.length }`
-                + ` wards in ${ span } seconds`);
+    console.log(`checking wards for ${who}... found ${relies.length} wards in ${span} seconds`);
   }
   return relies;
 }
@@ -374,14 +410,14 @@ const getBuds = async (args, web3, chainLog, address) => {
   for (const kiss of kisses) {
     const progress = Math.floor(100 * count / kisses.length);
     count ++;
-    process.stdout.write(`checking buds for ${ who }... ${ progress }%\r`);
+    process.stdout.write(`checking buds for ${who}... ${progress}%\r`);
     try {
       const bud = await contract.methods.bud(kiss).call();
       if (bud != 0) {
         buds.push(kiss);
       }
     } catch (err) {
-      console.log(`checking buds for ${ who }... no buds`);
+      console.log(`checking buds for ${who}... no buds`);
       hasBuds = false;
       break;
     }
@@ -389,8 +425,7 @@ const getBuds = async (args, web3, chainLog, address) => {
   const end = new Date();
   const span = Math.floor((end - start) / 1000);
   if (hasBuds) {
-    console.log(`checking buds for ${ who }... found ${ kisses.length }`
-                + ` buds in ${ span } seconds`);
+    console.log(`checking buds for ${who}... found ${kisses.length} buds in ${span} seconds`);
   }
   return buds;
 }
@@ -406,9 +441,9 @@ const isEoa = async (web3, address) => {
 const getAuthorities = async (env, args, web3, chainLog, address) => {
   const who = getWho(chainLog, address);
   if (who !== address) {
-    console.log(`\nstarting check for ${ who } (${ address })`);
+    console.log(`\nstarting check for ${who} (${address})`);
   } else {
-    console.log(`\nstarting check for address ${ address }...`);
+    console.log(`\nstarting check for address ${address}...`);
   }
   const eoa = await isEoa(web3, address);
   const owner = await getOwner(web3, chainLog, address);
@@ -429,9 +464,9 @@ const cacheLogs = async (args, web3, chainLog, addresses) => {
 
 const getGraph = async (env, args, web3, chainLog, address) => {
   const edges = [];
-  const vertices = { all: [], current: [], new: [ address ]};
+  const vertices = { all: [], current: [], new: [address] };
   let level = 0;
-  while(vertices.new.length && level < args.level) {
+  while (vertices.new.length && level < args.level) {
     level++;
     vertices.current = Array.from(new Set(vertices.new));
     vertices.all.push(...vertices.current);
@@ -439,29 +474,28 @@ const getGraph = async (env, args, web3, chainLog, address) => {
     await cacheLogs(args, web3, chainLog, vertices.current);
     for (const target of vertices.current) {
       const authorities = await getAuthorities(env, args, web3, chainLog, target);
+      const timestamp = new Date().toISOString();
       if (authorities.eoa) {
-        edges.push({ target, source: target, lbl: 'externally owned account' });
+        edges.push({ target, source: target, lbl: 'externally owned account', timestamp });
       }
       if (authorities.owner) {
-        edges.push({ target, source: authorities.owner, lbl: 'owner' });
+        edges.push({ target, source: authorities.owner, lbl: 'owner', timestamp });
         vertices.new.push(authorities.owner);
       }
       if (authorities.authority) {
-        edges.push({ target, source: authorities.authority, lbl: 'authority' });
+        edges.push({ target, source: authorities.authority, lbl: 'authority', timestamp });
         vertices.new.push(authorities.authority);
       }
       for (const ward of authorities.wards) {
-        edges.push({ target, source: ward, lbl: 'ward' });
+        edges.push({ target, source: ward, lbl: 'ward', timestamp });
         vertices.new.push(ward);
       }
       for (const bud of authorities.buds) {
-        edges.push({ target, source: bud, lbl: 'bud' });
+        edges.push({ target, source: bud, lbl: 'bud', timestamp });
         vertices.new.push(bud);
       }
     }
-    vertices.new = vertices.new.filter(vertex =>
-      !vertices.all.includes(vertex)
-    );
+    vertices.new = vertices.new.filter(vertex => !vertices.all.includes(vertex));
   }
   return edges;
 }
@@ -472,7 +506,7 @@ const getOracleAddresses = async (web3, chainLog) => {
   for (const address of Object.keys(chainLog)) {
     const who = chainLog[address];
     if (who.startsWith('PIP_')) {
-      console.log(`${ who } (${ address })`);
+      console.log(`${who} (${address})`);
       oracles.push(address);
       process.stdout.write('orbs: ');
       const abi = getJson('./lib/univ2-lp-oracle/out/UNIV2LPOracle.abi');
@@ -499,7 +533,7 @@ const getOracleAddresses = async (web3, chainLog) => {
       }
     }
   }
-  console.log(`found ${ oracles.length } oracle addresses`);
+  console.log(`found ${oracles.length} oracle addresses`);
   return oracles;
 }
 
@@ -507,7 +541,7 @@ const writeResult = (next, type) => {
   const dir = type === 'full' ? 'log' : type;
   let prev;
   try {
-    prev = fs.readFileSync(`${ dir }/latest.txt`, 'utf8');
+    prev = fs.readFileSync(`${dir}/latest.txt`, 'utf8');
   } catch (err) {
     prev = '';
   }
@@ -516,8 +550,8 @@ const writeResult = (next, type) => {
     console.log(next);
     console.log('no changes since last lookup');
   } else {
-    fs.writeFileSync(`${ dir }/${ new Date().getTime() }.txt`, next);
-    fs.writeFileSync(`${ dir }/latest.txt`, next);
+    fs.writeFileSync(`${dir}/${new Date().getTime()}.txt`, next);
+    fs.writeFileSync(`${dir}/latest.txt`, next);
     console.log(next);
     console.log('changes detected; created new file.');
     console.log('calculating diff, press Ctrl+C to skip');
@@ -541,11 +575,11 @@ const drawSubTree = (chainLog, graph, parents, root, level, depth) => {
   for (const edge of subGraph) {
     if (parents.includes(edge.source)) continue;
     const who = getWho(chainLog, edge.source);
-    const card = `${ edge.lbl }: ${ who }`;
+    const card = `${edge.lbl}: ${who}`;
     subTree[card] = drawSubTree(
       chainLog,
       graph,
-      [ ...parents, root ],
+      [...parents, root],
       edge.source,
       level + 1,
       depth
@@ -561,7 +595,7 @@ const drawReverseSubTree = (chainLog, graph, parents, root, level, depth) => {
   for (const edge of subGraph) {
     if (parents.includes(edge.target)) continue;
     const who = getWho(chainLog, edge.target);
-    const card = `${ edge.lbl } of ${ who }`;
+    const card = `${edge.lbl} of ${who}`;
     subTree[card] = drawReverseSubTree(
       chainLog,
       graph,
@@ -598,7 +632,7 @@ const drawPermissions = (chainLog, graph, depth, root) => {
 }
 
 const readGraph = who => {
-  return JSON.parse(fs.readFileSync(`cached/${ who }.json`, 'utf8'));
+  return JSON.parse(fs.readFileSync(`cached/${who}.json`, 'utf8'));
 }
 
 const getEdges = graph => {
@@ -609,13 +643,18 @@ const getEdges = graph => {
   return uniqueEdges;
 }
 
-const writeGraph = (chainLog, name, graph) => {
-  fs.writeFileSync(`cached/${ name }.json`, JSON.stringify(graph));
+const writeGraph = (chainLog, name, graph, dir = 'graph') => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  fs.writeFileSync(`${dir}/${name}.json`, JSON.stringify(graph));
   const namedGraph = graph.map(edge => {
     return {
       target: getWho(chainLog, edge.target),
       source: getWho(chainLog, edge.source),
-      label: edge.lbl
+      label: edge.lbl,
+      timestamp: edge.timestamp // Include timestamp in the output
     };
   });
   let edges = getEdges(namedGraph);
@@ -623,19 +662,19 @@ const writeGraph = (chainLog, name, graph) => {
     edges.push(...Object.values(chainLog));
     edges = Array.from(new Set(edges));
   }
-  const objectEdges = edges.map(edge => { return {id: edge}; });
-  const output = {links: namedGraph, nodes: objectEdges};
+  const objectEdges = edges.map(edge => { return { id: edge }; });
+  const output = { links: namedGraph, nodes: objectEdges };
   fs.writeFileSync(
-    `graph/${ name }.json`,
+    `${dir}/${name}.json`,
     JSON.stringify(output, null, 4)
   );
-}
+};
 
 const fullMode = async (env, args, web3, chainLog) => {
   console.log('performing full system lookup...');
   const vatAddress = getKey(chainLog, 'MCD_VAT');
   const oracleAddresses = await getOracleAddresses(web3, chainLog);
-  const addresses = [ vatAddress, ...oracleAddresses];
+  const addresses = [vatAddress, ...oracleAddresses];
   let fullGraph;
   if (cached(args).includes('graph')) {
     fullGraph = readGraph('full');
@@ -669,7 +708,7 @@ const getGraphs = async (env, args, web3, chainLog, addresses) => {
   let graph = [];
   let count = 0;
   for (const address of addresses) {
-    console.log(`\n\naddress ${ ++count } of ${ addresses.length }`);
+    console.log(`\n\naddress ${++count} of ${addresses.length}`);
     const who = getWho(chainLog, address);
     let oracleGraph;
     if (cached(args).includes('graph')) {
@@ -704,7 +743,7 @@ const parseAddress = (web3, chainLog, contract) => {
     address = getKey(chainLog, contract);
     if (!address) {
       console.log(chainLog);
-      console.log(`'${ contract }' isn't an address nor does it exist in the`
+      console.log(`'${contract}' isn't an address nor does it exist in the`
                   + ` chainlog.`);
       process.exit();
     }
@@ -715,7 +754,7 @@ const parseAddress = (web3, chainLog, contract) => {
 const permissionsMode = async (env, args, web3, chainLog, contract) => {
   const address = parseAddress(web3, chainLog, contract);
   const who = getWho(chainLog, address);
-  console.log(`performing permissions lookup for ${ who }...`);
+  console.log(`performing permissions lookup for ${who}...`);
   const vatAddress = getKey(chainLog, 'MCD_VAT');
   let graph = [];
   if (cached(args).includes('graph')) {
@@ -803,6 +842,7 @@ const ward = async () => {
       }
       let tree = '\n\n\n-----------------------------------\n\n\n';
       for (const contract of args.contracts) {
+        const dir = `graph_${contract}`;
         if (args.mode === 'permissions') {
           tree += await permissionsMode(env, args, web3, chainLog, contract);
           tree += '\n\n';
@@ -810,6 +850,7 @@ const ward = async () => {
           tree += await contractMode(env, args, web3, chainLog, contract);
           tree += '\n\n';
         }
+        writeGraph(chainLog, contract, tree, dir);
       }
       console.log(tree);
     }
